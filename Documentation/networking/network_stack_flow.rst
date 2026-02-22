@@ -5,7 +5,7 @@ Linux Network Stack Flow Deep Dive
 ==================================
 
 :Author: Generated from codebase analysis
-:Version: Based on Linux Kernel v6.x
+:Version: Based on Linux Kernel v6.19
 
 This document provides a comprehensive, code-referenced explanation of how
 packets flow through the Linux kernel network stack. Unlike theoretical
@@ -568,7 +568,7 @@ Application calls ``send()`` or ``write()`` which enters via::
 3.3 TCP Output Engine
 ---------------------
 
-**tcp_write_xmit()** in ``net/ipv4/tcp_output.c:66`` is the main output function::
+**tcp_write_xmit()** in ``net/ipv4/tcp_output.c:2966`` is the main output function::
 
     static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now,
                                 int nonagle, int push_one, gfp_t gfp)
@@ -1202,38 +1202,42 @@ creates the child socket::
 ------------------------
 
 Retransmission is handled by **tcp_retransmit_timer()** in
-``net/ipv4/tcp_timer.c``::
+``net/ipv4/tcp_timer.c:534``::
 
     void tcp_retransmit_timer(struct sock *sk)
     {
-        struct inet_connection_sock *icsk = inet_csk(sk);
         struct tcp_sock *tp = tcp_sk(sk);
+        struct inet_connection_sock *icsk = inet_csk(sk);
+        struct sk_buff *skb;
 
         // Check if we have outstanding data
-        if (!tp->packets_out) {
-            icsk_clear_pending(icsk, ICSK_TIME_RETRANS);
+        if (!tp->packets_out)
             return;
-        }
+
+        skb = tcp_rtx_queue_head(sk);
 
         // Check for timeout
         if (tcp_write_timeout(sk))
             goto out;
 
-        // Perform retransmission
-        if (tcp_retransmit_skb(sk, tcp_rtx_queue_head(sk), 1) > 0) {
-            // Retransmit failed
+        // Enter loss state and perform retransmission
+        tcp_enter_loss(sk);
+        if (tcp_retransmit_skb(sk, skb, 1) > 0) {
+            // Retransmit failed, try again later
             inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
-                                      min(icsk->icsk_rto, TCP_RESOURCE_PROBE_INTERVAL));
+                                      min(icsk->icsk_rto, TCP_RESOURCE_PROBE_INTERVAL),
+                                      tcp_rto_max(sk));
             goto out;
         }
 
-        // Exponential backoff
+        // Update retransmit statistics
+        tcp_update_rto_stats(sk);
         icsk->icsk_backoff++;
         icsk->icsk_retransmits++;
 
-        // Restart timer with doubled RTO
-        inet_csk_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
-                                  tcp_clamp_rto_to_user_timeout(sk));
+        // Restart timer with backed-off RTO
+        tcp_reset_xmit_timer(sk, ICSK_TIME_RETRANS,
+                             tcp_clamp_rto_to_user_timeout(sk), tcp_rto_max(sk));
     }
 
 
